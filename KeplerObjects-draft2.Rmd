@@ -1,0 +1,396 @@
+#Predicting the Presence of Exoplanets for Kepler Objects of Interest
+
+#Introduction
+
+Extrosolar planets may be discovered by detecting their host stars as the planets pass in front of them. Potential such host stars are referred to as "Kepler objects of interest". The data given to us contains information on a set of 9177 Kepler objects of interest, with 18 predictor variables that measure aspects related to exoplanets, host stars, exoplanet orbits, and transit, and a response variable that states for each observation if we have identified a confirmed exoplanet ("CONFIRMED"), have not identified an exoplanet ("FALSE POSITIVE"), or are unsure of the nature of what we have found ("CANDIDATE"). The descriptions of the predictors are given below:
+
+```{r echo = FALSE}
+names.vec = c("koi_period", "koi_eccen", "koi_impact", "koi_duration", "koi_depth", "koi_ror", "koi_srho", "koi_prad", "koi_sma", "koi_incl", "koi_teq", "koi_insol", "koi_dor", "koi_steff", "koi_slogg", "koi_smet", "koi_srad", "koi_smass")
+descrip.vec = c("The interval between consecutive planetary transits", "Eccentricity value of the exoplanet (i.e. the ratio of the distance from the center to the foci and the distance from the center to the vertices)", "The sky-projected distance between the center of the stellar disc and the center of the planet disc at conjunction, normalized by the stellar radius", "The duration of the observed transits", "The fraction of stellar flux lost at the minimum of the planetary transit", "The planet radius divided by the stellar radius", "The fitted stellar density", "The radius of the planet", "Half of the long axis of the ellipse defining a planet's orbit", "The angle between the plane of the sky (perpendicular to the line of sight) and the orbital plane of the planet candidate", "Approximation for the temperature of the planet", "The insolation flux", "The distance between the planet and the star at mid-transit divided by the stellar radius", "The photospheric temperature of the star", "The base-10 logarithm of the acceleration due to gravity at the surface of the star", "The base-10 logarithm of the Fe to H ratio at the surface of the star, normalized by the solar Fe to H ratio", "The photospheric radius of the star", "The mass of the star")
+var.df = data.frame("Names" = names.vec, "Descriptions" = descrip.vec)
+var.df
+```
+
+Our aim is to identify a model that may be trained in order to effectively differentiate between "CONFIRMED" and "FALSE POSITIVE" exoplanetary candidates.
+
+```{r message = FALSE, echo = FALSE, include = FALSE, warning = FALSE}
+rm(list=ls())
+file.path = "/Users/ananya/Desktop/OneDrive/Ananya/FALL 2019/36-290/Git/KeplersObjects/KEPLER_OBJS_INTEREST/koi.Rdata"
+load(file.path)
+df = data.frame(predictors,"y"=response)
+rm(file.path)
+objects()
+```
+```{r echo = FALSE}
+library(tidyverse)
+library(GGally)
+library(bestglm)
+library("pROC")
+```
+
+#Summary of given data
+
+Firstly, looking at our dataset, it appears that koi_eccen has only zeroes in it, so we may remove this predictor as it will likely not contribute much to our analysis. Next, we must remove the rows which have a response of "CANDIDATE" from our dataset as we are only interested in predicting our responses as either "CONFIRMED" or "FALSE POSITIVE". We will also split our data into test and training sets, keeping 80% of the data in our training set and the other portion in our test set.
+
+```{r}
+set.seed(101)
+df$koi_eccen = NULL
+predictors$koi_eccen = NULL
+response = droplevels(response, "CANDIDATE")
+indices.resp = which(response== "CONFIRMED" | response== "FALSE POSITIVE")
+response = response[indices.resp]
+rm.indices = which(df$y == "CANDIDATE")
+df.candidate = df[rm.indices,]
+pred.main = predictors
+resp.main = response
+df.main = df
+df = df[-rm.indices,]
+predictors = predictors[-rm.indices,]
+indices = sample(c(1:nrow(predictors)),0.8*nrow(predictors))
+pred.train = predictors[indices,]
+resp.train = response[indices]
+resp.test = response[-indices]
+pred.test = predictors[-indices,]
+```
+
+
+Next, we will conduct a summary of our dataset.
+
+```{r echo = FALSE}
+summary(df)
+```
+
+Upon looking at the summary of the given data, we notice that there are significant differences between the mean and median values (with higher mean than median values) for the koi_period, koi_depth, koi_srho, koi_prad, koi_insol, koi_sma and koi_dor variables, indicating right skewness in the distribution for these variables. There also appear to be strong outliers for many of the variables (such as koi_period, koi_prad and koi_depth), indicated by the large differences between the maximum and third quartile values for these variables. The data for variables such as koi_smass, koi_steff and koi_slogg hints at symmetric distributions, shown by the closeness between their mean and median values. 
+
+
+#Distributions of variables
+
+Upon conducting our initial visualization, it was noticed that many of our predictor variables were significantly skewed. To ensure that our analysis is smoother, we may transform our right-skewed variables using log transformations. In the case of koi_incl which was left-skewed, we may use a cube transformation.
+
+```{r}
+predictors$koi_period = log(predictors$koi_period)
+predictors$koi_depth = log(predictors$koi_depth)
+predictors$koi_srho = log(predictors$koi_srho)
+predictors$koi_prad = log(predictors$koi_prad)
+predictors$koi_insol = log(predictors$koi_insol)
+predictors$koi_dor = log(predictors$koi_dor)
+predictors$koi_sma = log(predictors$koi_sma)
+predictors$koi_incl = (predictors$koi_incl)^(3)
+df = data.frame(predictors,"y"=response)
+```
+
+##Orbit-related variables
+We may begin by creating diagrams to observe the distribution of our variables. To start with, we will look at orbit-related variables.
+
+```{r echo = FALSE}
+pred.orbit = (predictors[,c(1,8,9,12)])
+pred.orbit = pred.orbit %>% gather(.)
+ggplot(data = pred.orbit, mapping = aes(x=value))+ geom_histogram(col="black",fill = "blue") + facet_wrap(~key,scales='free_x') 
+```
+
+Koi_dor, koi_period and koi_sma appear to have roughly symmetric distributions, while the distribution of koi_incl still appears to be significantly left-skewed.
+
+##Transit/eclipse-related variables
+
+Next, we may look at the distributions for the transit/eclipse-related variables, namely, koi_impact, koi_duration, and koi_depth. Focusing on koi_depth, we observe a roughly symmetric (and perhaps bimodal) distribution.
+
+```{r echo = FALSE}
+ggplot(data = df, mapping = aes(x= koi_depth)) + geom_histogram(col = "black", fill="pink") 
+
+```
+
+##Exoplanet property-related variables
+
+Next, we may take a look at the exoplanet property-related variables, which are koi_ror, koi_prad, koi_teq and koi_insol. Focusing on koi_insol and koi_prad, we observe the following:
+
+```{r echo = FALSE}
+pred.prop = predictors[,c(7,11)]
+pred.prop = pred.prop %>% gather(.)
+ggplot(data = pred.prop, mapping = aes(x=value))+ geom_histogram(col="black",fill = "plum3") + facet_wrap(~key,scales='free_x') 
+
+```
+
+The distribution of koi_insol appears to be fairly symmetric and unimodal, while that for koi_prad appears to be somewhat symmetric and bimodal.
+
+##Host star property-related variables
+
+Finally, we may look at the distributions for the host star property-related variables (koi_srho, koi_steff, koi_slogg, koi_smet, koi_srad and koi_smass). Focusing on koi_srho, we observe the following:
+
+```{r echo = FALSE}
+ggplot(data = df, mapping = aes(x=koi_srho)) + geom_histogram(col = "black", fill = "lightcoral") 
+
+```
+
+Our histogram indicates that koi_srho has a fairly symmetric and unimodal distribution, with the mode situated at roughly 0.
+
+#Examining relationships between variables
+
+Before going on to conduct principal components analysis, it is useful to identify if any of the variables are strongly correlated with one another so as to reduce our number of predictors. We can examine this by constructing a correlation plot for our data as shown below.
+
+```{r echo = FALSE}
+library(corrplot)
+corrplot(cor(predictors), method = "number")
+```
+
+As shown by the correlation plot above, there appear to be especially strong positive correlations between koi_impact and koi_ror, koi_sma and koi_period, and fairly strong positive correlations between koi_dor and koi_period, koi_sma and koi_dor, and koi_insol and koi_teq. There also appear to be fairly strong negative correlations between koi_period and koi_insol, koi_insol and koi_sma, as well as between koi_insol and koi_dor. 
+
+We will observe the relationships between koi_impact and koi_ror, and between koi_sma and koi_period (as the positive correlation values between these variables were especially high), as well as the negative relationship between koi_period and koi_insol.
+
+##Koi_ror vs. Koi_impact
+
+```{r echo = FALSE}
+ggplot(data = df, mapping = aes(x=koi_impact,y=koi_ror)) + geom_point(col="red")
+```
+
+As shown by the scatterplot above, there appears to be a very strong positive relationship between koi_impact and koi_ror, with most of the data points occuring between 0 and around 12 (on both the y and x-axes). The relationship here appears to be rather deterministic, so it would be good for our analysis to remove one of the variables.
+
+##Koi_period vs. Koi_sma
+
+```{r echo = FALSE}
+ggplot(data = df, mapping = aes(x=koi_sma,y=koi_period)) + geom_point(col="red") 
+```
+
+The scatterplot shown above suggests a strong positive linear relationship between the two variables, with values becoming slightly less clustered and koi_sma and koi_period increase. This relationship also appears to be somewhat deterministic, so we may remove one of the variables from our dataset.
+
+##Koi_insol vs. Koi_period
+
+```{r echo = FALSE}
+ggplot(data = df, mapping = aes(x=koi_period,y=koi_insol)) + geom_point(col="red") + geom_density2d() 
+```
+
+There appears to be a fairly strong negative relationship between koi_period and koi_insol.
+
+Because of the very high correlation values between koi_impact and koi_ror and the rather deterministic relationship between the two, we will remove koi_ror. We will also remove koi_sma due to the deterministic relationship between koi_sma and koi_period.
+
+```{r}
+df = df[,-c(5,8)]
+predictors = predictors[,-c(5,8)]
+pred.train = pred.train[,-c(5,8)]
+pred.test = pred.test[,-c(5,8)]
+```
+
+#PC Analysis
+
+Given that we have a large number of variables in our dataset, conducting PCA would give us an idea of whether we could reduce the dimensionality of our predictor space.
+
+```{r}
+pr.out = prcomp(predictors, scale = TRUE)
+```
+
+PC1 appears to be most strongly tied to koi_insol, PC2 to koi_slogg, PC3 to koi_srho, PC4 to koi_depth, PC5 to koi_steff, PC6 to koi_impact, PC7 to koi_smet, PC8 to koi_incl, PC9 to koi_srad, PC10 to koi_srho, PC11 to koi_smass, PC12 to koi_teq, PC13 to koi_prad, PC14 to koi_insol, and PC15 to koi_dor.
+
+We may now construct a plot to observe the cumulative proportions of variance explained by our 15 principal components, so as to determine which ones we must retain:
+
+```{r echo = FALSE}
+pve = 100*pr.out$sdev^2/sum(pr.out$sdev^2)
+par(mfrow=c(1,2))
+df.new = data.frame("x" = 1:15, "y" = cumsum(pve))
+ggplot(data = df.new, mapping = aes(x,y)) + geom_point() + geom_line() + xlab("Cumulative PVE") + ylab("Principal Component")
+```
+
+As shown above, approximately 90% of the variance is explained by the first 7 principal components, so we do not have much need to retain the other 7. This is validated by our summary of pr.out, in which around 91.68% of the variance is explained by the first 7 principle components as shown below.
+
+```{r echo = FALSE}
+summary(pr.out)
+```
+
+Now, we may create a new dataset with only our 7 retained principal components (which we will need when conducting logistic regression analysis).
+
+```{r}
+set.seed(101)
+pca.pred.df = data.frame(predict(pr.out, predictors)[,1:7])
+pca.pred.train = pca.pred.df[indices,]
+pca.pred.test = pca.pred.df[-indices,]
+pca.df = data.frame(pca.pred.df, response)
+
+
+```
+
+##Regression Analyses
+
+We may now attempt to apply regression models to our data, and observe which ones provide us with the best fit (by identifying which ones yield the lowest misclassification rate). We will also note the area under the curve values for the ROC curves of each of our models.
+
+###Logistic Regression
+
+We can start with a logistic regression model:
+
+```{r}
+set.seed(101)
+#Using our main training and test data
+glm.out = glm(resp.train~., data = pred.train, family = binomial)
+summary(glm.out)
+resp.prob = predict(glm.out,newdata=pred.test,type="response")
+resp.pred = rep(NA,length(resp.prob))
+for ( ii in 1:length(resp.prob) ) {
+  if (resp.prob[ii] < 0.5) {
+    resp.pred[ii] = "CONFIRMED"   
+  } else {
+    resp.pred[ii] = "FALSE POSITIVE"   
+  }
+}
+tb = table(resp.pred, resp.test)
+tb
+mcr.glm = 1-sum(tb[1,1], tb[2,2])/sum(tb[1,1], tb[1,2], tb[2,1], tb[2,2])
+mcr.glm
+roc.glm = roc(resp.test, resp.prob)
+roc.glm$auc
+
+
+#Using our PCA training and test data
+glm.out.pca = glm(resp.train~., data = pca.pred.train, family = binomial)
+summary(glm.out.pca)
+resp.prob.pca = predict(glm.out.pca,newdata=pca.pred.test,type="response")
+resp.pred.pca = rep(NA,length(resp.prob.pca))
+for ( ii in 1:length(resp.prob.pca) ) {
+  if (resp.prob.pca[ii] < 0.5) {
+    resp.pred.pca[ii] = "CONFIRMED"   
+  } else {
+    resp.pred.pca[ii] = "FALSE POSITIVE"   
+  }
+}
+tb.pca = table(resp.pred.pca, resp.test)
+tb.pca
+mcr.glm.pca = 1-sum(tb.pca[1,1], tb.pca[2,2])/sum(tb.pca[1,1], tb.pca[1,2], tb.pca[2,1], tb.pca[2,2])
+mcr.glm.pca
+pca.roc.glm = roc(resp.test, resp.prob.pca)
+pca.roc.glm$auc
+```
+
+Since our MCR for logistic regression conducted on our regular training and test data (12.2%) is significantly lower than the MCR we receive when we conduct logistic regression on the training and test data we obtained through PCA (22.8%), we can continue to use our regular data when trying out potential models. Furthermore, we also observe that the AUC for logistic regression conducted on our regular training and test data is 0.9413, but only 0.8502 for logistic regression conducted on our PCA data.
+
+###Linear Discriminant Analysis
+
+Next, we can attempt to conduct a linear discriminant analysis:
+
+```{r echo = FALSE}
+set.seed(101)
+library(MASS)
+lda.fit=lda(resp.train~ ., data = pred.train)
+lda.pred=predict(lda.fit, pred.test, probability = TRUE)
+lda.class=lda.pred$class
+tb2 = table(lda.class,resp.test)
+tb2
+mcr.lda = 1-sum(tb2[1,1], tb2[2,2])/sum(tb2[1,1], tb2[1,2], tb2[2,1], tb2[2,2])
+mcr.lda
+roc.lda = roc(resp.test, as.numeric(lda.class))
+roc.lda$auc
+
+```
+
+Our LDA analysis gives us a misclassification rate of approximately 17.2%, which is fairly lower than what we received for logistic regression. We also receive a low AUC of only 0.8187, so we will not use this model.
+
+###Classification Tree
+
+Next, we may attempt to generate a classification tree.
+```{r echo = FALSE}
+library(rpart)
+library(rpart.plot)
+set.seed(101)
+tree.pred=rpart(resp.train~., data = pred.train)
+resp.prob.tree = predict(tree.pred, newdata = pred.test)
+resp.pred.tree = rep(NA,length(resp.test))
+for ( ii in 1:nrow(resp.prob.tree) ){
+  if (names(which.max(resp.prob.tree[ii,]))=="FALSE POSITIVE") {
+    resp.pred.tree[ii] = "FALSE POSITIVE"   
+  }else{
+    resp.pred.tree[ii] = "CONFIRMED"   
+  }
+}
+tb3 = table(resp.pred.tree, resp.test)
+tb3
+mcr.class = 1-sum(diag(tb3))/sum(tb3)
+mcr.class
+rpart.plot(tree.pred)
+roc.tree = roc(resp.test, as.numeric(as.factor(resp.pred.tree)))
+roc.tree$auc
+```
+
+According to our classification tree, the dominant predictors appear to be koi_prad, koi_dor, koi_period, koi_insol, koi_srho, koi_smet, and koi_duration.
+
+Our misclassification rate with this model is approximately 11.8%, which is lower than for our other models, so we would want to consider this model as the best option for our data if subsequent models do not yield a lower misclassification rate. Our ROC curve yields an AUC value of 0.8906.
+
+###Random Forest
+
+Lastly, we will use a random forest model.
+
+```{r echo = FALSE}
+set.seed(101)
+library(randomForest)
+
+rf.out = randomForest(resp.train~.,pred.train, importance = TRUE, trees = 100)
+resp.prob.rf = predict(rf.out, pred.test)
+tb.rf = table(resp.prob.rf, resp.test)
+tb.rf
+mcr.rf = 1-sum(diag(tb.rf))/sum(tb.rf)
+mcr.rf
+roc.rf = roc(resp.test, as.numeric(resp.prob.rf))
+roc.rf$auc
+varImpPlot(rf.out)
+```
+
+Upon a variable importance plot, we see that koi_prad and koi_dor seem to hold the highest amount of importance amongst the predictor variables.
+
+We find that our misclassification rate is significantly lower than for all the other models, at 7.1%. In addition to this, we receive a fairly high AUC value of 0.9264.
+
+###Naive Bayes
+
+We may now attempt to use a Naive Bayes classifier on our data.
+
+```{r echo = FALSE}
+library(naivebayes)
+naive = naive_bayes(pred.train, as.factor(resp.train))
+resp.pred.naive = predict(naive, pred.test)
+tb.naive = table(resp.pred.naive, resp.test)
+tb.naive
+mcr.naive = 1-sum(diag(tb.naive))/sum(tb.naive)
+mcr.naive
+roc.naive = roc(resp.test, as.numeric(resp.pred.naive))
+roc.naive$auc
+```
+
+We receive a fairly higher MCR - 24.05% - than in other models we have observed, as well as a relatively lower AUC - 0.8169. So we will not be considering the Naive Bayes classifier for our data.
+
+###XGBoost
+
+We may now try to use the XGBoost algorithm.
+
+```{r echo = FALSE}
+set.seed(101)
+library(xgboost)
+train.mat = xgb.DMatrix(data = as.matrix(pred.train), label = as.numeric(as.factor(resp.train)) - 1)
+test.mat =  xgb.DMatrix(data = as.matrix(pred.test), label = as.numeric(as.factor(resp.test)) - 1)
+cv.new = xgb.cv(train.mat, nfold = 5, nround = 20, params = list(objective = "binary:logistic"), verbose = 0)
+boost.new = xgboost(test.mat, nrounds = which.min(cv.new$evaluation_log$test_error_mean), verbose = 0)
+resp.prob.xg = predict(boost.new, newdata = test.mat, type = "response")
+roc.xg = roc(resp.test, resp.prob.xg)
+print(roc.xg$auc)
+
+resp.pred.xg = rep(NA,length(resp.prob))
+for ( ii in 1:length(resp.prob) ) {
+  if (resp.prob.xg[ii] < 0.5) {
+    resp.pred.xg[ii] = "CONFIRMED"   
+  } else {
+    resp.pred.xg[ii] = "FALSE POSITIVE"   
+  }
+}
+tb4 = table(resp.pred.xg, resp.test)
+mcr.boost = 1-sum(diag(tb4))/sum(tb4)
+mcr.boost
+```
+
+Our XGBoost algorithm yields a very low MCR of 0.001 and an extremely high AUC value of 1. So we would consider this model to be the best option for predicting responses for our data.
+
+Upon attempting ridge regression and lasso analyses, misclassification rates of 15% and 12% respectively were observed. Since these were both higher than for some of our other models, these models were discarded. Best subset selection was also considered, but due to the considerably large sample size of our data, it was too computationally inefficient to execute.
+
+##Conclusion
+
+After attempting to fit six potential models to our data, namely logistic regression, a classification tree, linear discriminant analysis, Naive Bayes, XGBoost, and random forest analysis, we found that using an XGBoost algorithm on our data yielded the lowest misclassification rate (as shown below). This suggests to us that an XGBoost model is likely the best possible option that would allow us to effectively categorize our exoplanetary candidates as either "CONFIRMED" or "FALSE POSITIVE".
+
+```{r echo = FALSE}
+mcr.vec = c(mcr.glm, mcr.glm.pca, mcr.class, mcr.lda, mcr.rf, mcr.naive, mcr.boost)
+names.vec = c("Logistic Regression", "Logistic Regression with PCA Data", "Classification Tree", "LDA Analysis", "Random Forest Analysis", "Naive Bayes", "XGBoost")
+auc.vec = c(roc.glm$auc, pca.roc.glm$auc, roc.tree$auc, roc.lda$auc, roc.rf$auc, roc.naive$auc, roc.xg$auc)
+mcr.data = data.frame("Name of Model" = names.vec, "MCR(in percent)" = round(mcr.vec,3)*100, "AUC(in percent)" = round(auc.vec,3)*100)
+mcr.data
+```
+
